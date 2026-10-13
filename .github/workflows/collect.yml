@@ -36,8 +36,8 @@ jobs:
               status = result.get('status')
               if status == 'ok':
                   remaining = result.get('pendingDetails', 0)
-                  print(f'Slice {attempt+1}: remaining details {remaining}')
-                  if not remaining:
+                  print(f'Slice {attempt+1}: phase {result.get("phase", "refresh")}')
+                  if not remaining and not result.get('more'):
                       break
               elif status != 'already_running':
                   raise SystemExit('Collection not ready or source validation failed')
