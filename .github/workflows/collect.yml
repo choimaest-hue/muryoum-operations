@@ -21,6 +21,7 @@ jobs:
           python3 - <<'PY'
           import json, os, time, urllib.request, urllib.error, re
           token = os.environ['MURYOUM_ADMIN_TOKEN'].strip()
+          user_agent = 'muryoum-operations/1.0 (https://github.com/choimaest-hue/muryoum-operations)'
           if not token:
               raise SystemExit('Missing collection credential')
           for attempt in range(100):
@@ -28,7 +29,7 @@ jobs:
                   'https://muryoum.choimaest.workers.dev/internal/collect',
                   data=b'', method='POST',
                   headers={'Authorization': 'Bearer ' + token,
-                           'User-Agent': 'muryoum-operations/1.0 (https://github.com/choimaest-hue/muryoum-operations)',
+                           'User-Agent': user_agent,
                            'Accept': 'application/json'})
               for retry in range(3):
                   try:
@@ -60,7 +61,8 @@ jobs:
               time.sleep(1)
           else:
               raise SystemExit('Bounded collection limit reached')
-          with urllib.request.urlopen('https://muryoum.choimaest.workers.dev/v1/health', timeout=15) as response:
+          health_request = urllib.request.Request('https://muryoum.choimaest.workers.dev/v1/health', headers={'User-Agent': user_agent, 'Accept': 'application/json'})
+          with urllib.request.urlopen(health_request, timeout=15) as response:
               health = json.load(response)
           if not health.get('configured') or health.get('stale'):
               raise SystemExit('Catalog freshness verification failed')
