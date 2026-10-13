@@ -1,0 +1,52 @@
+name: Refresh Muryoum public catalog
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+permissions: {}
+concurrency:
+  group: muryoum-collection
+  cancel-in-progress: false
+jobs:
+  collect:
+    if: vars.COLLECTION_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      MURYOUM_ADMIN_TOKEN: ${{ secrets.MURYOUM_ADMIN_TOKEN }}
+    steps:
+      - name: Refresh bounded source slices
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, time, urllib.request
+          token = os.environ['MURYOUM_ADMIN_TOKEN']
+          if not token:
+              raise SystemExit('Missing collection credential')
+          for attempt in range(100):
+              request = urllib.request.Request(
+                  'https://muryoum.choimaest.workers.dev/internal/collect',
+                  data=b'', method='POST',
+                  headers={'Authorization': 'Bearer ' + token})
+              try:
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      result = json.load(response)
+              except Exception:
+                  raise SystemExit('Collection request failed; previous catalog preserved') from None
+              status = result.get('status')
+              if status == 'ok':
+                  remaining = result.get('pendingDetails', 0)
+                  print(f'Slice {attempt+1}: remaining details {remaining}')
+                  if not remaining:
+                      break
+              elif status != 'already_running':
+                  raise SystemExit('Collection not ready or source validation failed')
+              time.sleep(1)
+          else:
+              raise SystemExit('Bounded collection limit reached')
+          with urllib.request.urlopen('https://muryoum.choimaest.workers.dev/v1/health', timeout=15) as response:
+              health = json.load(response)
+          if not health.get('configured') or health.get('stale'):
+              raise SystemExit('Catalog freshness verification failed')
+          print('Catalog refresh and freshness verification passed')
+          PY
