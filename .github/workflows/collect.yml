@@ -19,7 +19,7 @@ jobs:
         shell: bash
         run: |
           python3 - <<'PY'
-          import json, os, time, urllib.request, urllib.error
+          import json, os, time, urllib.request, urllib.error, re
           token = os.environ['MURYOUM_ADMIN_TOKEN'].strip()
           if not token:
               raise SystemExit('Missing collection credential')
@@ -27,7 +27,9 @@ jobs:
               request = urllib.request.Request(
                   'https://muryoum.choimaest.workers.dev/internal/collect',
                   data=b'', method='POST',
-                  headers={'Authorization': 'Bearer ' + token})
+                  headers={'Authorization': 'Bearer ' + token,
+                           'User-Agent': 'muryoum-operations/1.0 (https://github.com/choimaest-hue/muryoum-operations)',
+                           'Accept': 'application/json'})
               for retry in range(3):
                   try:
                       with urllib.request.urlopen(request, timeout=30) as response:
@@ -35,6 +37,9 @@ jobs:
                       break
                   except urllib.error.HTTPError as error:
                       code = error.code
+                      body = error.read(16384).decode('utf-8', errors='replace')
+                      edge_codes = re.findall(r'(?:error code:|Error\s+)(\d{3,5})', body, re.IGNORECASE)
+                      print('HTTP diagnostic: status=' + str(code) + '; edge_codes=' + ','.join(edge_codes))
                       if code not in (429, 500, 502, 503, 504) or retry == 2:
                           raise SystemExit(f'Collection HTTP {code}; previous catalog preserved') from None
                   except (urllib.error.URLError, TimeoutError):
