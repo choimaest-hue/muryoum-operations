@@ -19,8 +19,8 @@ jobs:
         shell: bash
         run: |
           python3 - <<'PY'
-          import json, os, time, urllib.request
-          token = os.environ['MURYOUM_ADMIN_TOKEN']
+          import json, os, time, urllib.request, urllib.error
+          token = os.environ['MURYOUM_ADMIN_TOKEN'].strip()
           if not token:
               raise SystemExit('Missing collection credential')
           for attempt in range(100):
@@ -28,11 +28,22 @@ jobs:
                   'https://muryoum.choimaest.workers.dev/internal/collect',
                   data=b'', method='POST',
                   headers={'Authorization': 'Bearer ' + token})
-              try:
-                  with urllib.request.urlopen(request, timeout=30) as response:
-                      result = json.load(response)
-              except Exception:
-                  raise SystemExit('Collection request failed; previous catalog preserved') from None
+              for retry in range(3):
+                  try:
+                      with urllib.request.urlopen(request, timeout=30) as response:
+                          result = json.load(response)
+                      break
+                  except urllib.error.HTTPError as error:
+                      code = error.code
+                      if code not in (429, 500, 502, 503, 504) or retry == 2:
+                          raise SystemExit(f'Collection HTTP {code}; previous catalog preserved') from None
+                  except (urllib.error.URLError, TimeoutError):
+                      if retry == 2:
+                          raise SystemExit('Collection network failure; previous catalog preserved') from None
+                  except Exception as error:
+                      # Never emit exception messages: malformed header errors can contain credentials.
+                      raise SystemExit('Collection failed: ' + type(error).__name__) from None
+                  time.sleep(5 * (retry + 1))
               status = result.get('status')
               if status == 'ok':
                   remaining = result.get('pendingDetails', 0)
