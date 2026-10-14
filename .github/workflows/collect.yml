@@ -20,13 +20,15 @@ jobs:
         run: |
           python3 - <<'PY'
           import json, os, time, urllib.request, urllib.error, re
+          from datetime import datetime
+          run_started = time.time()
           token = os.environ['MURYOUM_ADMIN_TOKEN'].strip()
           user_agent = 'muryoum-operations/1.0 (https://github.com/choimaest-hue/muryoum-operations)'
           if not token:
               raise SystemExit('Missing collection credential')
           for attempt in range(100):
               request = urllib.request.Request(
-                  'https://muryoum.choimaest.workers.dev/internal/collect',
+                  'https://muryoum.choimaest.workers.dev/internal/collect' + ('?refresh=full' if attempt == 0 else ''),
                   data=b'', method='POST',
                   headers={'Authorization': 'Bearer ' + token,
                            'User-Agent': user_agent,
@@ -66,5 +68,8 @@ jobs:
               health = json.load(response)
           if not health.get('configured') or health.get('stale'):
               raise SystemExit('Catalog freshness verification failed')
+          checked = datetime.fromisoformat(health['lastSuccess'].replace('Z', '+00:00')).timestamp()
+          if checked < run_started - 120:
+              raise SystemExit('This run did not confirm a fresh source list')
           print('Catalog refresh and freshness verification passed')
           PY
