@@ -3,73 +3,79 @@ on:
   schedule:
     - cron: '17 * * * *'
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Collect the catalog or read protected run diagnostics
+        type: choice
+        options: [collect, diagnostics]
+        default: collect
+      since:
+        description: Diagnostics start time in UTC ISO format (last seven days)
+        type: string
+        required: false
+      until:
+        description: Diagnostics end time in UTC ISO format (defaults to now)
+        type: string
+        required: false
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/collect.yml'
+      - 'scripts/**'
+      - 'tests/**'
 permissions: {}
-concurrency:
-  group: muryoum-collection
-  cancel-in-progress: false
 jobs:
+  regression-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Test collection diagnostics and preservation checks
+        run: python3 -m unittest discover -s tests -v
   collect:
-    if: vars.COLLECTION_ENABLED == 'true'
+    needs: regression-tests
+    if: >-
+      vars.COLLECTION_ENABLED == 'true' && github.ref == 'refs/heads/main' &&
+      (github.event_name == 'schedule' || github.event_name == 'push' ||
+       (github.event_name == 'workflow_dispatch' && inputs.mode != 'diagnostics'))
     runs-on: ubuntu-latest
     timeout-minutes: 8
-    env:
-      MURYOUM_ADMIN_TOKEN: ${{ secrets.MURYOUM_ADMIN_TOKEN }}
+    permissions:
+      contents: read
+    concurrency:
+      group: muryoum-collection
+      cancel-in-progress: false
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
       - name: Refresh bounded source slices
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          import json, os, time, urllib.request, urllib.error, re
-          from datetime import datetime
-          run_started = time.time()
-          token = os.environ['MURYOUM_ADMIN_TOKEN'].strip()
-          user_agent = 'muryoum-operations/1.0 (https://github.com/choimaest-hue/muryoum-operations)'
-          if not token:
-              raise SystemExit('Missing collection credential')
-          for attempt in range(100):
-              request = urllib.request.Request(
-                  'https://muryoum.choimaest.workers.dev/internal/collect' + ('?refresh=full' if attempt == 0 else ''),
-                  data=b'', method='POST',
-                  headers={'Authorization': 'Bearer ' + token,
-                           'User-Agent': user_agent,
-                           'Accept': 'application/json'})
-              for retry in range(3):
-                  try:
-                      with urllib.request.urlopen(request, timeout=30) as response:
-                          result = json.load(response)
-                      break
-                  except urllib.error.HTTPError as error:
-                      code = error.code
-                      body = error.read(16384).decode('utf-8', errors='replace')
-                      edge_codes = re.findall(r'(?:error code:|Error\s+)(\d{3,5})', body, re.IGNORECASE)
-                      print('HTTP diagnostic: status=' + str(code) + '; edge_codes=' + ','.join(edge_codes))
-                      if code not in (429, 500, 502, 503, 504) or retry == 2:
-                          raise SystemExit(f'Collection HTTP {code}; previous catalog preserved') from None
-                  except (urllib.error.URLError, TimeoutError):
-                      if retry == 2:
-                          raise SystemExit('Collection network failure; previous catalog preserved') from None
-                  except Exception as error:
-                      # Never emit exception messages: malformed header errors can contain credentials.
-                      raise SystemExit('Collection failed: ' + type(error).__name__) from None
-                  time.sleep(5 * (retry + 1))
-              status = result.get('status')
-              if status == 'ok':
-                  remaining = result.get('pendingDetails', 0)
-                  print(f'Slice {attempt+1}: phase {result.get("phase", "refresh")}')
-                  if not remaining and not result.get('more'):
-                      break
-              elif status != 'already_running':
-                  raise SystemExit('Collection not ready or source validation failed')
-              time.sleep(1)
-          else:
-              raise SystemExit('Bounded collection limit reached')
-          health_request = urllib.request.Request('https://muryoum.choimaest.workers.dev/v1/health', headers={'User-Agent': user_agent, 'Accept': 'application/json'})
-          with urllib.request.urlopen(health_request, timeout=15) as response:
-              health = json.load(response)
-          if not health.get('configured') or health.get('stale'):
-              raise SystemExit('Catalog freshness verification failed')
-          checked = datetime.fromisoformat(health['lastSuccess'].replace('Z', '+00:00')).timestamp()
-          if checked < run_started - 120:
-              raise SystemExit('This run did not confirm a fresh source list')
-          print('Catalog refresh and freshness verification passed')
-          PY
+        env:
+          MURYOUM_ADMIN_TOKEN: ${{ secrets.MURYOUM_ADMIN_TOKEN }}
+        run: python3 scripts/collect_catalog.py
+  diagnostics:
+    needs: regression-tests
+    if: >-
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+      inputs.mode == 'diagnostics'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Read protected collection diagnostics
+        env:
+          MURYOUM_ADMIN_TOKEN: ${{ secrets.MURYOUM_ADMIN_TOKEN }}
+          MURYOUM_OPERATION_MODE: diagnostics
+          MURYOUM_DIAGNOSTICS_SINCE: ${{ inputs.since }}
+          MURYOUM_DIAGNOSTICS_UNTIL: ${{ inputs.until }}
+        run: python3 scripts/collect_catalog.py
