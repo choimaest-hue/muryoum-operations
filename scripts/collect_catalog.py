@@ -128,7 +128,7 @@ def _credential(token):
 
 
 def run_collection(token, *, opener=None, clock=time.time, sleep=time.sleep,
-                   emit=print, max_slices=MAX_SLICES):
+                   emit=print, max_slices=MAX_SLICES, scope_id=None):
     """Run against the fixed service URL; dependencies are injectable for offline tests."""
     token = _credential(token)
     opener = opener or urllib.request.build_opener(NoRedirect()).open
@@ -169,7 +169,10 @@ def run_collection(token, *, opener=None, clock=time.time, sleep=time.sleep,
 
     force_list = True
     for index in range(max_slices):
-        path = "/internal/collect" + ("?refresh=full" if force_list else "")
+        query = {"scopeId": scope_id} if scope_id else {}
+        if force_list:
+            query["refresh"] = "full"
+        path = "/internal/collect" + ("?" + urllib.parse.urlencode(query) if query else "")
         request = urllib.request.Request(
             BASE_URL + path, data=b"", method="POST",
             headers={**headers, "Authorization": "Bearer " + token},
@@ -187,6 +190,11 @@ def run_collection(token, *, opener=None, clock=time.time, sleep=time.sleep,
                 raise CollectionFailure("CLIENT_INVALID_RESPONSE")
             force_list = False
             emit(f"Slice {index + 1}: phase={phase}; pendingDetails={pending}")
+            quality = result.get("quality")
+            if phase == "snapshot" and isinstance(quality, dict):
+                safe = {key: quality[key] for key in ("published", "freeTuition", "openFree", "conflict", "sessionsVerified", "reminderEligible")
+                        if type(quality.get(key)) is int and 0 <= quality[key] <= 1000}
+                emit("Content quality: " + json.dumps(safe, sort_keys=True))
             if phase == "snapshot" and not more and not pending:
                 break
         elif status != "already_running":
@@ -197,6 +205,19 @@ def run_collection(token, *, opener=None, clock=time.time, sleep=time.sleep,
 
     # Public checks use no Authorization header. Bypass cached responses for freshness.
     public_headers = {**headers, "Cache-Control": "no-cache"}
+    if scope_id:
+        catalog = fetch(urllib.request.Request(BASE_URL + "/v2/catalog?" + urllib.parse.urlencode({"scopeId": scope_id}), headers=public_headers),
+                        4 * 1024 * 1024, "Scoped catalog request")
+        checked = _timestamp(catalog.get("fetchedAt"))
+        if (catalog.get("schemaVersion") != 2 or catalog.get("coverageScope") != [scope_id]
+                or checked is None or checked < run_started - 120 or checked > clock() + 120
+                or not isinstance(catalog.get("courses"), list)):
+            raise CollectionFailure("CLIENT_CATALOG_FAILED")
+        ids = [c.get("id") if isinstance(c, dict) else None for c in catalog["courses"]]
+        if any(not isinstance(value, str) or not value for value in ids) or len(set(ids)) != len(ids):
+            raise CollectionFailure("CLIENT_CATALOG_FAILED")
+        emit(f"Scoped catalog freshness verification passed: courses={len(ids)}")
+        return
     health = fetch(urllib.request.Request(BASE_URL + "/v1/health", headers=public_headers),
                    65536, "Health request")
     checked = _timestamp(health.get("lastSuccess"))
@@ -274,7 +295,22 @@ def main(*, environ=None, emit=print, **kwargs):
             run_diagnostics(token, since=env.get("MURYOUM_DIAGNOSTICS_SINCE", ""),
                             until=env.get("MURYOUM_DIAGNOSTICS_UNTIL", ""), emit=emit, **kwargs)
         elif mode == "collect":
-            run_collection(token, emit=emit, **kwargs)
+            configured = env.get("MURYOUM_COLLECTION_DISTRICTS", "")
+            if configured:
+                failed = False
+                for district in configured.split(","):
+                    if district not in {"관악구", "금천구", "서초구", "동작구"}:
+                        raise CollectionFailure("CLIENT_MODE_INVALID")
+                    emit("Source scope: " + district)
+                    try:
+                        run_collection(token, scope_id=f"seoul:{district}:education", emit=emit, **kwargs)
+                    except CollectionFailure as error:
+                        failed = True
+                        emit("Scope failed: " + district + "; code=" + error.code)
+                if failed:
+                    raise CollectionFailure("CLIENT_COLLECTION_FAILED")
+            else:
+                run_collection(token, emit=emit, **kwargs)
         else:
             raise CollectionFailure("CLIENT_MODE_INVALID")
         return 0

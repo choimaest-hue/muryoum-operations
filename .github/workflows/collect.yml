@@ -45,7 +45,7 @@ jobs:
       (github.event_name == 'schedule' || github.event_name == 'push' ||
        (github.event_name == 'workflow_dispatch' && inputs.mode != 'diagnostics'))
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 30
     permissions:
       contents: read
     concurrency:
@@ -58,6 +58,7 @@ jobs:
       - name: Refresh bounded source slices
         env:
           MURYOUM_ADMIN_TOKEN: ${{ secrets.MURYOUM_ADMIN_TOKEN }}
+          MURYOUM_COLLECTION_DISTRICTS: 관악구,금천구,서초구,동작구
         run: python3 scripts/collect_catalog.py
   diagnostics:
     needs: regression-tests

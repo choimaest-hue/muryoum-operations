@@ -49,6 +49,28 @@ class ScriptedHTTP:
 
 
 class CollectionTests(unittest.TestCase):
+    def test_scoped_catalog_checks_coverage_and_never_sends_admin_token_to_public_api(self):
+        scope='seoul:관악구:education'
+        catalog=catalog_ok(schemaVersion=2,coverageScope=[scope])
+        http=ScriptedHTTP([list_ok(),snapshot_ok(),catalog])
+        collector.run_collection(TOKEN,scope_id=scope,opener=http,clock=lambda:NOW,sleep=lambda _:None,emit=lambda _:None)
+        self.assertIn('scopeId=',http.requests[0].full_url)
+        self.assertIsNone(http.requests[-1].get_header('Authorization'))
+        http=ScriptedHTTP([list_ok(),snapshot_ok(),{**catalog,'coverageScope':['seoul:다른구:education']}])
+        with self.assertRaises(collector.CollectionFailure):
+            collector.run_collection(TOKEN,scope_id=scope,opener=http,clock=lambda:NOW,sleep=lambda _:None,emit=lambda _:None)
+
+    def test_one_failed_scope_does_not_skip_healthy_districts(self):
+        calls=[]
+        def run(token, **kwargs):
+            calls.append(kwargs['scope_id'])
+            if len(calls)==1:
+                raise collector.CollectionFailure('CLIENT_COLLECTION_FAILED')
+        with patch.object(collector,'run_collection',side_effect=run):
+            result=collector.main(environ={'MURYOUM_ADMIN_TOKEN':TOKEN,'MURYOUM_COLLECTION_DISTRICTS':'관악구,금천구,서초구,동작구'},emit=lambda line:None)
+        self.assertEqual(result,1)
+        self.assertEqual(len(calls),4)
+
     def run_case(self, responses, *, token=TOKEN, mode="collect", since="", until="", **kwargs):
         http = ScriptedHTTP(responses)
         lines, sleeps = [], []
