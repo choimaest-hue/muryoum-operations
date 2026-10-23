@@ -191,8 +191,8 @@ def run_collection(token, *, opener=None, clock=time.time, sleep=time.sleep,
             force_list = False
             emit(f"Slice {index + 1}: phase={phase}; pendingDetails={pending}")
             quality = result.get("quality")
-            if phase == "snapshot" and isinstance(quality, dict):
-                safe = {key: quality[key] for key in ("published", "freeTuition", "openFree", "conflict", "sessionsVerified", "reminderEligible")
+            if phase in {"list", "snapshot"} and isinstance(quality, dict):
+                safe = {key: quality[key] for key in ("raw", "eligible", "excluded", "published", "freeTuition", "openFree", "conflict", "sessionsVerified", "reminderEligible")
                         if type(quality.get(key)) is int and 0 <= quality[key] <= 1000}
                 emit("Content quality: " + json.dumps(safe, sort_keys=True))
             if phase == "snapshot" and not more and not pending:
