@@ -16,7 +16,12 @@ BASE_URL = "https://muryoum.choimaest.workers.dev"
 USER_AGENT = "muryoum-operations/1.1 (https://github.com/choimaest-hue/muryoum-operations)"
 MAX_ATTEMPTS = 3
 MAX_SLICES = 120  # Up to 100 validated details, list, snapshot, and lock contention.
-MAX_SECONDS = 420  # Leave time before the workflow's eight-minute timeout.
+MAX_SECONDS = 420  # Per district; workflow groups contain at most five districts.
+SEOUL_DISTRICTS = frozenset({
+    "관악구", "금천구", "서초구", "동작구", "강남구", "강동구", "강북구", "강서구", "광진구", "구로구",
+    "노원구", "도봉구", "동대문구", "마포구", "서대문구", "성동구", "성북구", "송파구", "양천구", "영등포구",
+    "용산구", "은평구", "종로구", "중구", "중랑구",
+})
 HTTP_CODES = frozenset({400, 401, 403, 404, 408, 413, 414, 422, 429, 500, 502,
                         503, 504, 520, 521, 522, 523, 524, 525, 526})
 TRANSIENT_HTTP = frozenset({408, 429, 500, 502, 503, 504, 520, 521, 522, 523,
@@ -297,10 +302,11 @@ def main(*, environ=None, emit=print, **kwargs):
         elif mode == "collect":
             configured = env.get("MURYOUM_COLLECTION_DISTRICTS", "")
             if configured:
+                districts = configured.split(",")
+                if len(districts) != len(set(districts)) or any(d not in SEOUL_DISTRICTS for d in districts):
+                    raise CollectionFailure("CLIENT_MODE_INVALID")
                 failed = False
-                for district in configured.split(","):
-                    if district not in {"관악구", "금천구", "서초구", "동작구"}:
-                        raise CollectionFailure("CLIENT_MODE_INVALID")
+                for district in districts:
                     emit("Source scope: " + district)
                     try:
                         run_collection(token, scope_id=f"seoul:{district}:education", emit=emit, **kwargs)

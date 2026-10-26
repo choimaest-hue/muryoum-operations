@@ -45,11 +45,26 @@ jobs:
       (github.event_name == 'schedule' || github.event_name == 'push' ||
        (github.event_name == 'workflow_dispatch' && inputs.mode != 'diagnostics'))
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - group: southwest
+            districts: 관악구,금천구,서초구,동작구,구로구
+          - group: west
+            districts: 강서구,양천구,영등포구,마포구,은평구
+          - group: north
+            districts: 강북구,노원구,도봉구,성북구,동대문구
+          - group: east
+            districts: 강남구,강동구,광진구,성동구,송파구
+          - group: center
+            districts: 서대문구,용산구,종로구,중구,중랑구
     permissions:
       contents: read
     concurrency:
-      group: muryoum-collection
+      group: muryoum-collection-${{ matrix.group }}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -58,7 +73,7 @@ jobs:
       - name: Refresh bounded source slices
         env:
           MURYOUM_ADMIN_TOKEN: ${{ secrets.MURYOUM_ADMIN_TOKEN }}
-          MURYOUM_COLLECTION_DISTRICTS: 관악구,금천구,서초구,동작구
+          MURYOUM_COLLECTION_DISTRICTS: ${{ matrix.districts }}
         run: python3 scripts/collect_catalog.py
   diagnostics:
     needs: regression-tests

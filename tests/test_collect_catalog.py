@@ -49,6 +49,21 @@ class ScriptedHTTP:
 
 
 class CollectionTests(unittest.TestCase):
+    def test_all_seoul_scopes_are_collected_once(self):
+        districts=sorted(collector.SEOUL_DISTRICTS)
+        with patch.object(collector, 'run_collection') as run:
+            result=collector.main(environ={'MURYOUM_ADMIN_TOKEN':TOKEN,'MURYOUM_COLLECTION_DISTRICTS':','.join(districts)},emit=lambda _:None)
+        self.assertEqual(result,0)
+        self.assertEqual(len(districts),25)
+        self.assertEqual([call.kwargs['scope_id'] for call in run.call_args_list],[f'seoul:{d}:education' for d in districts])
+
+    def test_invalid_or_duplicate_scopes_fail_before_any_collection(self):
+        for districts in ['관악구,미지원구','마포구,마포구','강북구,']:
+            with patch.object(collector, 'run_collection') as run:
+                result=collector.main(environ={'MURYOUM_ADMIN_TOKEN':TOKEN,'MURYOUM_COLLECTION_DISTRICTS':districts},emit=lambda _:None)
+            self.assertEqual(result,1)
+            run.assert_not_called()
+
     def test_scoped_catalog_checks_coverage_and_never_sends_admin_token_to_public_api(self):
         scope='seoul:관악구:education'
         catalog=catalog_ok(schemaVersion=2,coverageScope=[scope])
