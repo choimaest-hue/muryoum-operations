@@ -1,0 +1,27 @@
+name: Refresh nationwide official courses
+on:
+  schedule:
+    - cron: '43 20 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: muryoum-national-collection
+  cancel-in-progress: false
+jobs:
+  collect:
+    if: vars.NATIONAL_COLLECTION_ENABLED == 'true' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - name: Validate complete official sources and publish atomically
+        env:
+          MURYOUM_ADMIN_TOKEN: ${{ secrets.MURYOUM_ADMIN_TOKEN }}
+          MURYOUM_REPORT_DIR: artifacts/national
+        run: node scripts/collect-national.mjs
