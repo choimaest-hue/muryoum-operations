@@ -2,12 +2,12 @@
 
 This repository contains the public deployment workflow for the Muryoum public-course catalog. It contains no Android source, user data, source API credentials, or signing material.
 
-The hourly workflow calls the dedicated authenticated collection endpoint and checks catalog freshness. It uses a standard GitHub-hosted runner without artifact or cache uploads. Collection remains disabled until the production data contract has been validated.
+The four-hourly workflow calls the dedicated authenticated collection endpoint and checks catalog freshness. It uses a standard GitHub-hosted runner without artifact or cache uploads. Collection remains gated by the repository enable variable.
 
 ## Execution and tests
 
 - Pull requests run offline regression tests only. They receive no collection secret and cannot start collection or read protected diagnostics.
-- The hourly schedule, an explicit `workflow_dispatch` with mode `collect`, and relevant changes pushed to `main` run collection after tests pass. Actual collection also requires `COLLECTION_ENABLED=true`.
+- The four-hourly schedule and an explicit `workflow_dispatch` with mode `collect` run collection after tests pass. Actual collection also requires `COLLECTION_ENABLED=true`. Pushes run regression tests only, avoiding extra full collections during releases.
 - Workflow dispatch mode `diagnostics` reads protected run metadata only. It does not refresh, remove, or publish courses. Both production jobs are restricted to `main`.
 - Checkout is pinned to an immutable commit and does not persist its GitHub credential.
 
@@ -20,6 +20,8 @@ python3 -m unittest discover -s tests -v
 `scripts/collect_catalog.py` is the single collection client. When invoked normally it performs a real production collection using the existing `MURYOUM_ADMIN_TOKEN` environment variable. Never put the token on the command line or in a committed file. Tests inject local responses and never call the service.
 
 ## Failure handling and public verification
+
+As of 2026-10-29, Seoul runs at 01:17, 05:17, 09:17, 13:17, 17:17 and 21:17 KST: six scheduled rounds per day instead of 24 (75% fewer rounds). Nationwide collection runs Monday, Wednesday and Friday at 09:43 KST. This reduces scheduled work; it is not a guarantee of a particular D1 row-read total. Public app queries remain on KV, and the six-hour Seoul verification expiry is unchanged. If collection fails, old availability and reminder claims still lose verification rather than being treated as current. Inspect actual D1 use and collection success after the 09:00 KST quota reset.
 
 The client prints only allowlisted status, phase, and error codes; UUID run identifiers; bounded numeric counts; and a validated catalog revision. It never prints response bodies, upstream URLs, headers, arbitrary exception messages, or unknown code strings. The Seoul source API puts its key in the URL path, so source URLs must not be logged. Redirects are rejected to prevent forwarding the administration token to another URL. Public health and catalog requests carry no administration token.
 
