@@ -2,12 +2,12 @@
 
 This repository contains the public deployment workflow for the Muryoum public-course catalog. It contains no Android source, user data, source API credentials, or signing material.
 
-The four-hourly workflow calls the dedicated authenticated collection endpoint and checks catalog freshness. It uses a standard GitHub-hosted runner without artifact or cache uploads. Collection remains gated by the repository enable variable.
+The six-hourly Seoul workflow calls the dedicated authenticated collection endpoint and verifies all publication receipts after collection. It uses the existing GitHub-hosted runner and retains bounded, credential-free receipts for seven days. Collection remains gated by the repository enable variable.
 
 ## Execution and tests
 
 - Pull requests run offline regression tests only. They receive no collection secret and cannot start collection or read protected diagnostics.
-- The four-hourly schedule and an explicit `workflow_dispatch` with mode `collect` run collection after tests pass. Actual collection also requires `COLLECTION_ENABLED=true`. Pushes run regression tests only, avoiding extra full collections during releases.
+- The six-hourly schedule and an explicit `workflow_dispatch` with mode `collect` run collection after tests pass. Actual collection also requires `COLLECTION_ENABLED=true`. Pushes run regression tests only, avoiding extra full collections during releases.
 - Workflow dispatch mode `diagnostics` reads protected run metadata only. It does not refresh, remove, or publish courses. Both production jobs are restricted to `main`.
 - Checkout is pinned to an immutable commit and does not persist its GitHub credential.
 
@@ -21,19 +21,23 @@ python3 -m unittest discover -s tests -v
 
 ## Failure handling and public verification
 
-As of 2026-10-29, Seoul runs at 01:17, 05:17, 09:17, 13:17, 17:17 and 21:17 KST: six scheduled rounds per day instead of 24 (75% fewer rounds). Nationwide collection runs Monday, Wednesday and Friday at 09:43 KST. This reduces scheduled work; it is not a guarantee of a particular D1 row-read total. Public app queries remain on KV, and the six-hour Seoul verification expiry is unchanged. If collection fails, old availability and reminder claims still lose verification rather than being treated as current. Inspect actual D1 use and collection success after the 09:00 KST quota reset.
+As of 2026-11-05, Seoul runs at 03:17, 09:17, 15:17 and 21:17 KST. Ordinary unchanged details are checked every 24 hours; new, changed, and important details are checked in the applicable collection round. List staleness uses an eight-hour threshold; detailed evidence retains its separate expiry. A successful list fetch does not renew detailed evidence. Nationwide metadata is checked daily at 10:43 KST with Monday full reconciliation. Library metadata is checked Monday at 10:13 KST, with full reconciliation on the first Monday of the month. These are reductions in specific work, not guarantees of a total cost reduction. See `NATIONAL_COLLECTION.md`.
+
+Account usage at 70% is a warning; at 85%, ordinary detail checks and national full collection are deferred. Missing or over-two-hour-old telemetry also defers optional work. The current telemetry task requires the existing logged-in Windows session; public data and important checks remain available while telemetry is unavailable. The daily quota resets at 09:00 KST, and fresh telemetry is required to resume optional work.
 
 The client prints only allowlisted status, phase, and error codes; UUID run identifiers; bounded numeric counts; and a validated catalog revision. It never prints response bodies, upstream URLs, headers, arbitrary exception messages, or unknown code strings. The Seoul source API puts its key in the URL path, so source URLs must not be logged. Redirects are rejected to prevent forwarding the administration token to another URL. Public health and catalog requests carry no administration token.
 
 An HTTP 200 response can still contain `status: error`. Such a response now receives the same bounded retry policy as transient transport failures: three total attempts, with five- and ten-second delays. The client retries only its own explicit transient-code allowlist, regardless of a remote `retryable` flag. Network failures, selected temporary HTTP statuses, and Seoul `ERROR-500`/`ERROR-600` are transient. Configuration, source shape, ID, scope, and filter-validation failures stop immediately. The complete allowlists are `SOURCE_CODES` and `TRANSIENT_CODES` in the client; unknown codes are reported as `COLLECTION_FAILED`.
 
-Each district run forces a fresh source list, including after initial lock contention. At most 120 slices and seven minutes are allowed per district. All 25 Seoul districts are split into five independent groups of five, with at most two groups running concurrently and a 40-minute timeout per group. A failed district does not skip the remaining districts; each group serializes overlapping scheduled/manual runs. This accommodates the current maximum of 100 validated source rows plus list/publication steps. A workflow failure is not itself proof that the published catalog is unchanged; preservation is verified by Worker regression tests and public snapshot comparisons.
+Each district run forces a fresh source list, including after initial lock contention. At most 120 slices and seven minutes are allowed per district. All 25 Seoul districts are split into five independent groups of five, with at most two groups running concurrently and a 40-minute timeout per group. A failed district does not skip the remaining districts. The workflow serializes collection through public verification, so a newer scheduled/manual run cannot replace the receipt being verified. Diagnostics and regression-only runs do not hold that lock. A workflow failure is not itself proof that the published catalog is unchanged; preservation is verified by Worker regression tests and public snapshot comparisons.
 
 Success requires all of the following:
 
-1. Collection reaches the snapshot phase with no pending details.
-2. `/v1/health` reports configured, not stale, and a valid `lastSuccess` no earlier than two minutes before this run.
-3. `/v1/catalog` returns schema version 1, a valid revision, a timestamp at least as recent as the checked health state, and a list without missing or duplicate course IDs.
+1. Collection reaches the snapshot phase and returns a validated publication receipt for every district.
+2. The aggregate `/v2/catalog` passes schema, scope, coverage and unique-ID checks.
+3. Every district's revision, source confirmation time, public count and sorted-ID hash match its receipt.
+
+Only older publication metadata is retried: once at eight minutes after the last publication, using a public GET with no collection or admin credential. Persistent delay fails with `PUBLICATION_NOT_VISIBLE`. Structural/content errors fail immediately. Logs contain the failed condition and bounded comparison evidence, never raw source payloads. A verified empty scope is valid.
 
 An empty catalog can be legitimate when the official source has no eligible courses; it is not replaced with invented content. Existing source validation and public API URLs remain the publishing authority.
 
