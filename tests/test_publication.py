@@ -49,3 +49,26 @@ class PublicationTests(unittest.TestCase):
         r=receipt(publicCount=0,idsHash=hashlib.sha256(b'[]').hexdigest())
         body=catalog(r);body['courses']=[]
         c.verify_publications([r],opener=ScriptedHTTP([body]),clock=lambda:NOW,emit=lambda _:None)
+
+    def test_mismatch_logs_only_comparable_evidence(self):
+        body=catalog();body['courses'][0]['id']='seoul:S2'
+        body['privateSourceUrl']='https://example.invalid/secret-key'
+        logs=[]
+        with self.assertRaises(c.CollectionFailure):
+            c.verify_publications([receipt()],opener=ScriptedHTTP([body]),clock=lambda:NOW,emit=logs.append)
+        evidence=json.loads(logs[0].split(': ',1)[1])
+        self.assertEqual(evidence['condition'],'coverage_count_or_id_hash_mismatch')
+        self.assertEqual(evidence['expectedCount'],1)
+        self.assertEqual(evidence['actualCount'],1)
+        self.assertNotEqual(evidence['expectedIdsHash'],evidence['actualIdsHash'])
+        self.assertNotIn('secret-key',''.join(logs))
+
+    def test_invalid_coverage_fails_immediately_with_condition(self):
+        for coverage in [[SCOPE,SCOPE],['unknown'],[{}]]:
+            body=catalog();body['coverageScope']=coverage
+            logs=[];sleeps=[]
+            with self.assertRaises(c.CollectionFailure) as error:
+                c.verify_publications([receipt()],opener=ScriptedHTTP([body]),clock=lambda:NOW,sleep=sleeps.append,emit=logs.append)
+            self.assertEqual(error.exception.code,'PUBLIC_CATALOG_INVALID')
+            self.assertIn('unknown_or_duplicate_coverage',logs[0])
+            self.assertEqual(sleeps,[])

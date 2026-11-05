@@ -294,44 +294,53 @@ def verify_publications(receipts, *, opener=None, clock=time.time, sleep=time.sl
     opener = opener or urllib.request.build_opener(NoRedirect()).open
     retry_at = max(_timestamp(r["publishedAt"]) for r in receipts) + 480
     request = urllib.request.Request(BASE_URL + "/v2/catalog", headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+    def fail(code, condition, **evidence):
+        emit("Publication verification failed: " + json.dumps({"code": code, "condition": condition, **evidence}, sort_keys=True))
+        raise CollectionFailure(code)
+
     for attempt in range(2):
         catalog = _read_json(opener, request, 4 * 1024 * 1024, 30)
         courses, scopes, coverage = catalog.get("courses"), catalog.get("availableScopes"), catalog.get("coverageScope")
         if catalog.get("schemaVersion") != 2 or not isinstance(courses, list) or not isinstance(scopes, list) or not isinstance(coverage, list):
-            raise CollectionFailure("PUBLIC_CATALOG_INVALID")
+            fail("PUBLIC_CATALOG_INVALID", "schema_or_collection_shape")
         ids = [c.get("id") if isinstance(c, dict) else None for c in courses]
         if any(not isinstance(i, str) or not re.fullmatch("seoul:S[A-Za-z0-9]+", i) for i in ids) or len(set(ids)) != len(ids):
-            raise CollectionFailure("PUBLIC_CATALOG_INVALID")
+            fail("PUBLIC_CATALOG_INVALID", "invalid_or_duplicate_course_id")
         known = {f"seoul:{d}:education" for d in SEOUL_DISTRICTS}
         if any(not isinstance(s, dict) or s.get("id") not in known for s in scopes) or len({s["id"] for s in scopes}) != len(scopes):
-            raise CollectionFailure("PUBLIC_CATALOG_INVALID")
+            fail("PUBLIC_CATALOG_INVALID", "unknown_or_duplicate_scope")
+        if any(not isinstance(s, str) or s not in known for s in coverage) or len(set(coverage)) != len(coverage):
+            fail("PUBLIC_CATALOG_INVALID", "unknown_or_duplicate_coverage")
         if any(not isinstance(c.get("scopeId"), str) or c["scopeId"] not in coverage for c in courses):
-            raise CollectionFailure("PUBLIC_CATALOG_INVALID")
+            fail("PUBLIC_CATALOG_INVALID", "course_outside_coverage")
         by_scope = {s["id"]: s for s in scopes}
         pending = []
         for expected in receipts:
             actual_scope = by_scope.get(expected["scope"], {})
             raw = actual_scope.get("publication")
-            actual = validate_receipt(raw, clock()) if raw is not None else None
+            try:
+                actual = validate_receipt(raw, clock()) if raw is not None else None
+            except CollectionFailure:
+                fail("PUBLIC_CATALOG_INVALID", "invalid_public_receipt", scope=expected["scope"])
             if actual and actual["scope"] != expected["scope"]:
-                raise CollectionFailure("PUBLIC_CATALOG_INVALID")
+                fail("PUBLIC_CATALOG_INVALID", "receipt_scope_mismatch", scope=expected["scope"], actualScope=actual["scope"])
             visible = actual is not None and actual["revision"] == expected["revision"] and actual["fetchedAt"] == expected["fetchedAt"]
             if not visible:
                 # A different receipt at the same or later check time is a mismatch, not cache lag.
                 if actual and _timestamp(actual["fetchedAt"]) >= _timestamp(expected["fetchedAt"]):
-                    raise CollectionFailure("PUBLIC_CONTENT_MISMATCH")
+                    fail("PUBLIC_CONTENT_MISMATCH", "revision_or_confirmation_mismatch", scope=expected["scope"], expectedRevision=expected["revision"], actualRevision=actual["revision"], expectedAt=expected["fetchedAt"], actualAt=actual["fetchedAt"])
                 pending.append(expected["scope"])
                 emit("Publication pending: " + json.dumps({"scope": expected["scope"], "expectedRevision": expected["revision"], "actualRevision": actual["revision"] if actual else None, "expectedAt": expected["fetchedAt"], "actualAt": actual["fetchedAt"] if actual else None}, sort_keys=True))
                 continue
             scoped_ids = sorted(c["id"] for c in courses if c["scopeId"] == expected["scope"])
             ids_hash = hashlib.sha256(json.dumps(scoped_ids, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
             if expected["scope"] not in coverage or len(scoped_ids) != expected["publicCount"] or ids_hash != expected["idsHash"]:
-                raise CollectionFailure("PUBLIC_CONTENT_MISMATCH")
+                fail("PUBLIC_CONTENT_MISMATCH", "coverage_count_or_id_hash_mismatch", scope=expected["scope"], inCoverage=expected["scope"] in coverage, expectedCount=expected["publicCount"], actualCount=len(scoped_ids), expectedIdsHash=expected["idsHash"], actualIdsHash=ids_hash)
         if not pending:
             emit(f"Public publication verification passed: scopes={len(receipts)}; publicCourses={len(ids)}; attempts={attempt + 1}")
             return
         if attempt:
-            raise CollectionFailure("PUBLICATION_NOT_VISIBLE")
+            fail("PUBLICATION_NOT_VISIBLE", "stale_after_visibility_deadline", pendingScopes=pending, attempts=attempt + 1)
         sleep(max(0, retry_at - clock()))
 
 
