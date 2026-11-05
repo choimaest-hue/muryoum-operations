@@ -1,4 +1,4 @@
-// Generated from muryoum backend. Source SHA-256: 64a6c74b3fa05db6479efff1f88ccbebe418ed9fcf3ab37941043e15cd09ae8f
+// Generated from muryoum backend. Source SHA-256: ccebc601438bdf4feb1a60696d52f4ce3c675f28112bb27116cdc7afb2bac3e4
 // Rebuild with: node scripts/bundle-national.mjs
 
 // src/model.ts
@@ -184,6 +184,7 @@ async function collectNational({ token, mode = "national", force = false, fetche
     if (internal && d.usage) {
       for (const k of Object.keys(usage)) if (k !== "workerRequests" && typeof d.usage[k] === "number") usage[k] += d.usage[k];
     }
+    if (internal && d.status === "error" && ["QUOTA_EXCEEDED", "PUBLICATION_FAILED", "COLLECTION_FAILED"].includes(d.code)) throw Error(d.code);
     return d;
   };
   const report = (value) => {
@@ -283,7 +284,7 @@ try {
   await mkdir(output, { recursive: true });
   await writeFile(`${output}/national-audit.json`, JSON.stringify(report, null, 2));
 } catch (error) {
-  const code = error instanceof Error && /^(?:SOURCE|WORKER)_HTTP_\d{3}$|^(?:SOURCE_CONTRACT_CHANGED|SOURCE_MAINTENANCE|INVALID_SOURCE_PAGE|INCOMPLETE_SOURCE|LIBRARY_SAVE_FAILED|EMPTY_VALIDATED_CATALOG|STAGING_NOT_CONFIRMED|PUBLICATION_NOT_CONFIRMED|CONFIGURATION_INCOMPLETE)$/.test(error.message) ? error.message : "COLLECTION_FAILED";
+  const code = error instanceof Error && /^(?:SOURCE|WORKER)_HTTP_\d{3}$|^(?:QUOTA_EXCEEDED|PUBLICATION_FAILED|SOURCE_CONTRACT_CHANGED|SOURCE_MAINTENANCE|INVALID_SOURCE_PAGE|INCOMPLETE_SOURCE|LIBRARY_SAVE_FAILED|EMPTY_VALIDATED_CATALOG|STAGING_NOT_CONFIRMED|PUBLICATION_NOT_CONFIRMED|CONFIGURATION_INCOMPLETE)$/.test(error.message) ? error.message : "COLLECTION_FAILED";
   console.error(JSON.stringify({ status: "error", code }));
   process.exitCode = 1;
 }
