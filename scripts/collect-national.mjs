@@ -1,4 +1,4 @@
-// Generated from muryoum backend. Source SHA-256: 550079d7901943b5e38f38abafb83783b08ed8e894ea9ef08092cef471d5e679
+// Generated from muryoum backend. Source SHA-256: ecd5cf32721403e0d97f2510940348266fe9aa0a01d34eaaad69ac43678561fc
 // Rebuild with: node scripts/bundle-national.mjs
 
 // src/model.ts
@@ -219,6 +219,10 @@ async function collectNational({ token, mode = "national", force = false, fetche
       const rows2 = raw.map((r) => Object.fromEntries(["LBRRY_NM", "RDNMADR", "LONGITUDE", "LATITUDE", "REFERENCE_DATE"].map((k) => [k, String(r[k] ?? "")])));
       library = { fingerprint: fingerprint2, sourceRows: rows2.length, metadataCheckedAt: now, fullCheckedAt: now, revision: await contentHash(rows2), rows: rows2 };
       const response = await json(API + "/internal/collection-state", { kind: "library", state: library, rows: rows2 });
+      if (response.status !== "saved") throw Error("LIBRARY_SAVE_FAILED");
+    } else {
+      library = { ...library, metadataCheckedAt: now };
+      const response = await json(API + "/internal/collection-state", { kind: "library", state: library, rows: library.rows });
       if (response.status !== "saved") throw Error("LIBRARY_SAVE_FAILED");
     }
     if (mode === "library") return report({ status: "checked", sourceRows: library.sourceRows, revision: library.revision });
