@@ -1,4 +1,4 @@
-// Generated from muryoum backend. Source SHA-256: ecd5cf32721403e0d97f2510940348266fe9aa0a01d34eaaad69ac43678561fc
+// Generated from muryoum backend. Source SHA-256: 64a6c74b3fa05db6479efff1f88ccbebe418ed9fcf3ab37941043e15cd09ae8f
 // Rebuild with: node scripts/bundle-national.mjs
 
 // src/model.ts
