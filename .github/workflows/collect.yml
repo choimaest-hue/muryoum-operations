@@ -75,7 +75,37 @@ jobs:
         env:
           MURYOUM_ADMIN_TOKEN: ${{ secrets.MURYOUM_ADMIN_TOKEN }}
           MURYOUM_COLLECTION_DISTRICTS: ${{ matrix.districts }}
+          MURYOUM_DEFER_VERIFY: 'true'
         run: python3 scripts/collect_catalog.py
+      - name: Preserve bounded publication receipts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: publication-${{ matrix.group }}
+          path: receipts/manifest.json
+          retention-days: 7
+          if-no-files-found: error
+  verify-publication:
+    needs: collect
+    if: always() && needs.collect.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: publication-*
+          path: receipts
+      - name: Verify visible publications without recollecting sources
+        env:
+          MURYOUM_OPERATION_MODE: verify
+        run: |
+          python3 -c "from pathlib import Path; [p.rename(p.parent.parent / (p.parent.name + '.json')) for p in Path('receipts').glob('*/manifest.json')]"
+          python3 scripts/collect_catalog.py
   diagnostics:
     needs: regression-tests
     if: >-

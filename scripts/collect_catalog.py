@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import hashlib
+from pathlib import Path
 import os
 import re
 import sys
@@ -52,6 +54,8 @@ CLIENT_CODES = frozenset({
     "CLIENT_FRESHNESS_FAILED", "CLIENT_CATALOG_FAILED", "CLIENT_UNEXPECTED_ERROR",
     "CLIENT_MODE_INVALID", "CLIENT_DIAGNOSTIC_QUERY_INVALID",
     "CLIENT_DIAGNOSTIC_RESPONSE_INVALID", "DIAGNOSTICS_UNAVAILABLE",
+    "PUBLICATION_NOT_VISIBLE", "PUBLICATION_RECEIPT_INVALID", "PUBLIC_CATALOG_INVALID",
+    "PUBLIC_CONTENT_MISMATCH", "SOURCE_COLLECTION_FAILED",
 })
 
 
@@ -133,7 +137,7 @@ def _credential(token):
 
 
 def run_collection(token, *, opener=None, clock=time.time, sleep=time.sleep,
-                   emit=print, max_slices=MAX_SLICES, scope_id=None):
+                   emit=print, max_slices=MAX_SLICES, scope_id=None, defer_verify=False):
     """Run against the fixed service URL; dependencies are injectable for offline tests."""
     token = _credential(token)
     opener = opener or urllib.request.build_opener(NoRedirect()).open
@@ -208,6 +212,13 @@ def run_collection(token, *, opener=None, clock=time.time, sleep=time.sleep,
     else:
         raise CollectionFailure("CLIENT_BOUNDED_LIMIT")
 
+    if defer_verify:
+        receipt = validate_receipt(result.get("publication"), clock())
+        if receipt["scope"] != scope_id:
+            raise CollectionFailure("PUBLICATION_RECEIPT_INVALID")
+        emit("Publication receipt: " + json.dumps(receipt, sort_keys=True))
+        return receipt
+
     # Public checks use no Authorization header. Bypass cached responses for freshness.
     public_headers = {**headers, "Cache-Control": "no-cache"}
     if scope_id:
@@ -243,6 +254,84 @@ def run_collection(token, *, opener=None, clock=time.time, sleep=time.sleep,
     if any(not isinstance(value, str) or not value for value in ids) or len(set(ids)) != len(ids):
         raise CollectionFailure("CLIENT_CATALOG_FAILED")
     emit(f"Catalog refresh and freshness verification passed: revision={revision}; courses={len(courses)}")
+
+
+def validate_receipt(value, now):
+    scopes = {f"seoul:{d}:education" for d in SEOUL_DISTRICTS}
+    if not isinstance(value, dict) or value.get("scope") not in scopes:
+        raise CollectionFailure("PUBLICATION_RECEIPT_INVALID")
+    if (not isinstance(value.get("revision"), str) or not REVISION.fullmatch(value["revision"])
+            or type(value.get("publicCount")) is not int or not 0 <= value["publicCount"] <= 1000
+            or not isinstance(value.get("idsHash"), str) or not re.fullmatch("[a-f0-9]{64}", value["idsHash"])):
+        raise CollectionFailure("PUBLICATION_RECEIPT_INVALID")
+    for key in ("fetchedAt", "publishedAt"):
+        stamp = _timestamp(value.get(key))
+        if stamp is None or not now - 86400 <= stamp <= now + 120:
+            raise CollectionFailure("PUBLICATION_RECEIPT_INVALID")
+    return {k: value[k] for k in ("scope", "revision", "fetchedAt", "publishedAt", "publicCount", "idsHash")}
+
+
+def verify_publications(receipts, *, opener=None, clock=time.time, sleep=time.sleep, emit=print):
+    receipts = [validate_receipt(r, clock()) for r in receipts]
+    if not receipts or len({r["scope"] for r in receipts}) != len(receipts):
+        raise CollectionFailure("PUBLICATION_RECEIPT_INVALID")
+    opener = opener or urllib.request.build_opener(NoRedirect()).open
+    retry_at = max(_timestamp(r["publishedAt"]) for r in receipts) + 480
+    request = urllib.request.Request(BASE_URL + "/v2/catalog", headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+    for attempt in range(2):
+        catalog = _read_json(opener, request, 4 * 1024 * 1024, 30)
+        courses, scopes, coverage = catalog.get("courses"), catalog.get("availableScopes"), catalog.get("coverageScope")
+        if catalog.get("schemaVersion") != 2 or not isinstance(courses, list) or not isinstance(scopes, list) or not isinstance(coverage, list):
+            raise CollectionFailure("PUBLIC_CATALOG_INVALID")
+        ids = [c.get("id") if isinstance(c, dict) else None for c in courses]
+        if any(not isinstance(i, str) or not re.fullmatch("seoul:S[A-Za-z0-9]+", i) for i in ids) or len(set(ids)) != len(ids):
+            raise CollectionFailure("PUBLIC_CATALOG_INVALID")
+        known = {f"seoul:{d}:education" for d in SEOUL_DISTRICTS}
+        if any(not isinstance(s, dict) or s.get("id") not in known for s in scopes) or len({s["id"] for s in scopes}) != len(scopes):
+            raise CollectionFailure("PUBLIC_CATALOG_INVALID")
+        if any(not isinstance(c.get("scopeId"), str) or c["scopeId"] not in coverage for c in courses):
+            raise CollectionFailure("PUBLIC_CATALOG_INVALID")
+        by_scope = {s["id"]: s for s in scopes}
+        pending = []
+        for expected in receipts:
+            actual_scope = by_scope.get(expected["scope"], {})
+            raw = actual_scope.get("publication")
+            actual = validate_receipt(raw, clock()) if raw is not None else None
+            if actual and actual["scope"] != expected["scope"]:
+                raise CollectionFailure("PUBLIC_CATALOG_INVALID")
+            visible = actual is not None and actual["revision"] == expected["revision"] and actual["fetchedAt"] == expected["fetchedAt"]
+            if not visible:
+                # A different receipt at the same or later check time is a mismatch, not cache lag.
+                if actual and _timestamp(actual["fetchedAt"]) >= _timestamp(expected["fetchedAt"]):
+                    raise CollectionFailure("PUBLIC_CONTENT_MISMATCH")
+                pending.append(expected["scope"])
+                emit("Publication pending: " + json.dumps({"scope": expected["scope"], "expectedRevision": expected["revision"], "actualRevision": actual["revision"] if actual else None, "expectedAt": expected["fetchedAt"], "actualAt": actual["fetchedAt"] if actual else None}, sort_keys=True))
+                continue
+            scoped_ids = sorted(c["id"] for c in courses if c["scopeId"] == expected["scope"])
+            ids_hash = hashlib.sha256(json.dumps(scoped_ids, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+            if expected["scope"] not in coverage or len(scoped_ids) != expected["publicCount"] or ids_hash != expected["idsHash"]:
+                raise CollectionFailure("PUBLIC_CONTENT_MISMATCH")
+        if not pending:
+            emit(f"Public publication verification passed: scopes={len(receipts)}; publicCourses={len(ids)}; attempts={attempt + 1}")
+            return
+        if attempt:
+            raise CollectionFailure("PUBLICATION_NOT_VISIBLE")
+        sleep(max(0, retry_at - clock()))
+
+
+def verify_manifests(directory, **kwargs):
+    receipts, failed, covered = [], [], []
+    for path in sorted(Path(directory).glob("*.json")):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        receipts.extend(data["receipts"])
+        failed.extend(data["failed"])
+        covered.extend(data["districts"])
+    if len(covered) != 25 or set(covered) != SEOUL_DISTRICTS:
+        raise CollectionFailure("PUBLICATION_RECEIPT_INVALID")
+    if receipts:
+        verify_publications(receipts, **kwargs)
+    if failed:
+        raise CollectionFailure("SOURCE_COLLECTION_FAILED")
 
 
 def run_diagnostics(token, *, since="", until="", opener=None, clock=time.time,
@@ -296,7 +385,9 @@ def main(*, environ=None, emit=print, **kwargs):
         env = os.environ if environ is None else environ
         mode = env.get("MURYOUM_OPERATION_MODE", "collect")
         token = env.get("MURYOUM_ADMIN_TOKEN", "")
-        if mode == "diagnostics":
+        if mode == "verify":
+            verify_manifests(env.get("MURYOUM_RECEIPT_DIR", "receipts"), emit=emit, **kwargs)
+        elif mode == "diagnostics":
             run_diagnostics(token, since=env.get("MURYOUM_DIAGNOSTICS_SINCE", ""),
                             until=env.get("MURYOUM_DIAGNOSTICS_UNTIL", ""), emit=emit, **kwargs)
         elif mode == "collect":
@@ -306,13 +397,23 @@ def main(*, environ=None, emit=print, **kwargs):
                 if len(districts) != len(set(districts)) or any(d not in SEOUL_DISTRICTS for d in districts):
                     raise CollectionFailure("CLIENT_MODE_INVALID")
                 failed = False
+                receipts, failures = [], []
+                defer = env.get("MURYOUM_DEFER_VERIFY") == "true"
                 for district in districts:
                     emit("Source scope: " + district)
                     try:
-                        run_collection(token, scope_id=f"seoul:{district}:education", emit=emit, **kwargs)
+                        extra = {"defer_verify": True} if defer else {}
+                        receipt = run_collection(token, scope_id=f"seoul:{district}:education", emit=emit, **extra, **kwargs)
+                        if defer:
+                            receipts.append(receipt)
                     except CollectionFailure as error:
                         failed = True
+                        failures.append(district)
                         emit("Scope failed: " + district + "; code=" + error.code)
+                if defer:
+                    output = Path(env.get("MURYOUM_RECEIPT_DIR", "receipts"))
+                    output.mkdir(parents=True, exist_ok=True)
+                    (output / "manifest.json").write_text(json.dumps({"receipts": receipts, "failed": failures, "districts": districts}), encoding="utf-8")
                 if failed:
                     raise CollectionFailure("CLIENT_COLLECTION_FAILED")
             else:
