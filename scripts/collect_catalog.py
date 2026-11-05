@@ -29,7 +29,7 @@ HTTP_CODES = frozenset({400, 401, 403, 404, 408, 413, 414, 422, 429, 500, 502,
 TRANSIENT_HTTP = frozenset({408, 429, 500, 502, 503, 504, 520, 521, 522, 523,
                            524, 525, 526})
 SOURCE_CODES = frozenset({
-    "COLLECTION_FAILED", "CONFIGURATION_INCOMPLETE", "SCOPE_EXCEEDS_PAGE_LIMIT",
+    "COLLECTION_FAILED", "CONFIGURATION_INCOMPLETE", "SCOPE_EXCEEDS_PAGE_LIMIT", "QUOTA_EXCEEDED", "PUBLICATION_FAILED",
     "INCOMPLETE_SOURCE_PAGE", "SOURCE_FILTER_MISMATCH",
     "SCOPE_EXCEEDS_VALIDATED_CAPACITY", "SOURCE_ID_INVALID_OR_DUPLICATED",
     "DETAIL_ID_MISMATCH", "INVALID_SOURCE_ID", "SEOUL_KEY_REQUIRED",
@@ -184,7 +184,9 @@ def run_collection(token, *, opener=None, clock=time.time, sleep=time.sleep,
                 # HTTP 200 source errors need the same bounded retry as transport errors.
                 # Never trust a remote retryable flag or an arbitrary code/exception string.
                 if code not in TRANSIENT_CODES or attempt + 1 == MAX_ATTEMPTS:
-                    raise CollectionFailure("CLIENT_COLLECTION_FAILED")
+                    failure = CollectionFailure("CLIENT_COLLECTION_FAILED")
+                    failure.source_code = code
+                    raise failure
             pause(5 * (attempt + 1))
         raise CollectionFailure("CLIENT_COLLECTION_FAILED")
 
@@ -411,7 +413,7 @@ def main(*, environ=None, emit=print, **kwargs):
                 if len(districts) != len(set(districts)) or any(d not in SEOUL_DISTRICTS for d in districts):
                     raise CollectionFailure("CLIENT_MODE_INVALID")
                 failed = False
-                receipts, failures = [], []
+                receipts, failures, failure_codes = [], [], {}
                 defer = env.get("MURYOUM_DEFER_VERIFY") == "true"
                 for district in districts:
                     emit("Source scope: " + district)
@@ -423,11 +425,21 @@ def main(*, environ=None, emit=print, **kwargs):
                     except CollectionFailure as error:
                         failed = True
                         failures.append(district)
-                        emit("Scope failed: " + district + "; code=" + error.code)
+                        code = getattr(error, "source_code", error.code)
+                        failure_codes[code] = failure_codes.get(code, 0) + 1
+                        emit("Scope failed: " + district + "; code=" + code)
+                        if env.get("GITHUB_ACTIONS") == "true":
+                            emit("::error title=" + code + "::" + district + ": " + code)
                 if defer:
                     output = Path(env.get("MURYOUM_RECEIPT_DIR", "receipts"))
                     output.mkdir(parents=True, exist_ok=True)
-                    (output / "manifest.json").write_text(json.dumps({"receipts": receipts, "failed": failures, "districts": districts}), encoding="utf-8")
+                    summary = {"receipts": receipts, "failed": failures, "districts": districts, "failureCodes": failure_codes}
+                    (output / "manifest.json").write_text(json.dumps(summary), encoding="utf-8")
+                    emit("Final failure counts: " + json.dumps(failure_codes, sort_keys=True))
+                    if env.get("GITHUB_STEP_SUMMARY"):
+                        total = {key: sum(r.get("usage", {}).get(key, 0) for r in receipts) for key in ("sourceRequests", "workerRequests", "d1RowsRead", "d1RowsWritten", "kvReads", "kvWrites", "retries")}
+                        with open(env["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as report:
+                            report.write("\nCompleted scopes: " + str(len(receipts)) + "; failed scopes: " + str(len(failures)) + "\n\n```json\n" + json.dumps({"completedScopeUsage": total, "finalFailureCodes": failure_codes}, indent=2) + "\n```\n")
                 if failed:
                     raise CollectionFailure("CLIENT_COLLECTION_FAILED")
             else:
