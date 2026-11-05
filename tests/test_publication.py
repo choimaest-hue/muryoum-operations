@@ -16,6 +16,8 @@ class PublicationTests(unittest.TestCase):
     def test_collection_returns_receipt_without_public_requests(self):
         http=ScriptedHTTP([list_ok(), snapshot_ok(publication=receipt())])
         result=c.run_collection(TOKEN, scope_id=SCOPE, defer_verify=True, opener=http, clock=lambda:NOW, sleep=lambda _:None, emit=lambda _:None)
+        usage = result.pop("usage")
+        self.assertEqual(usage["workerRequests"], 2)
         self.assertEqual(result,receipt())
         self.assertEqual([r.get_method() for r in http.requests],['POST','POST'])
 

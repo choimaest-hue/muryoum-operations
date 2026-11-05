@@ -1,8 +1,5 @@
-// Generated from muryoum backend. Source SHA-256: a4d15c588c290ade06fa32057c398959fba5bbad147a03837aab1ffca5101dde
+// Generated from muryoum backend. Source SHA-256: eb640600e1a77d8007f6d3794928de5fc2f5d2dfa42d4c074976391c7ca8cabd
 // Rebuild with: node scripts/bundle-national.mjs
-
-// scripts/collect-national.ts
-import { mkdir, writeFile, readFile } from "node:fs/promises";
 
 // src/model.ts
 function textOnly(value) {
@@ -58,11 +55,11 @@ function dateOnly(v) {
   const d = /* @__PURE__ */ new Date(`${s}T00:00:00Z`);
   return Number.isFinite(d.getTime()) && d.toISOString().slice(0, 10) === s ? s : null;
 }
-async function normalizeNational(r, now2) {
+async function normalizeNational(r, now) {
   const s = (k) => textOnly(r[k]);
   const title = s("LCTRE_NM"), institution = s("OPER_INSTITUTION_NM"), address = s("EDC_RDNMADR").replace(/\s+/g, " ");
   const end = dateOnly(r.EDC_END_DAY), start = dateOnly(r.EDC_START_DAY), reference = dateOnly(r.REFERENCE_DATE);
-  const today = new Date(Date.parse(now2) + 9 * 36e5).toISOString().slice(0, 10);
+  const today = new Date(Date.parse(now) + 9 * 36e5).toISOString().slice(0, 10);
   if (!title || !institution || !address || !start || !end || start > end || end < today || !reference || reference > today || Date.parse(today) - Date.parse(reference) > 180 * 864e5) return null;
   if (/시설\s*대관|무료\s*상담|개별\s*상담/.test(title)) return null;
   const parts = address.split(" "), region = REGION_ALIASES[parts[0]] ?? parts[0];
@@ -74,7 +71,7 @@ async function normalizeNational(r, now2) {
   receptionWindows.forEach((w) => {
     w.start = new Date(w.start).toISOString();
   });
-  const closed = !!receptionWindows.length && receptionWindows[0].end <= now2;
+  const closed = !!receptionWindows.length && receptionWindows[0].end <= now;
   const cost = s("LCTRE_COST"), amount = /^\d+(?:\.0+)?$/.test(cost) ? Number(cost) : null;
   const target = s("EDC_TRGET_TYPE"), description = s("LCTRE_CO");
   const course = {
@@ -111,7 +108,7 @@ async function normalizeNational(r, now2) {
     description: [description, `\uC6B4\uC601\uAE30\uAD00: ${institution}`, `\uC6B4\uC601 \uC694\uC77C: ${s("OPER_DAY") || "\uD655\uC778 \uD544\uC694"}`, `\uAD50\uC721 \uC2DC\uAC04: ${s("EDC_START_TIME")} ~ ${s("EDC_COLSE_TIME")}`, `\uBB38\uC758: ${s("OPER_PHONE_NUMBER")}`].join("\n"),
     fieldEvidence: [{ field: "identity", source: "15013110", note: JSON.stringify(identity) }, { field: "source", source: NATIONAL_SOURCE, note: `\uC81C\uACF5\uAE30\uAD00 ${s("INSTT_NM")} \xB7 \uAE30\uC900\uC77C ${reference}` }],
     qualityFlags: ["RECEPTION_TIME_REQUIRES_REVIEW", "ELIGIBILITY_REQUIRES_REVIEW", "LOCATION_UNVERIFIED"],
-    fetchedAt: now2,
+    fetchedAt: now,
     sourceUpdatedAt: `${reference}T00:00:00+09:00`,
     verifiedAt: null,
     sourceContentHash: await digest(JSON.stringify(r)),
@@ -140,85 +137,149 @@ async function normalizeNational(r, now2) {
 
 // src/locations.ts
 var compact = (v) => String(v ?? "").normalize("NFKC").replace(/\s+/g, "").replace(/경기도?/g, "\uACBD\uAE30\uB3C4").replace(/서울특별시/g, "\uC11C\uC6B8").replace(/강원특별자치도|강원도/g, "\uAC15\uC6D0").replace(/전북특별자치도|전라북도/g, "\uC804\uBD81");
-function matchLibrary(c, rows2) {
+function matchLibrary(c, rows) {
   if (c.delivery === "online") return c;
   const institution = c.description.split("\n").find((x) => x.startsWith("\uC6B4\uC601\uAE30\uAD00: "))?.slice(6) ?? "";
-  const candidates = rows2.filter((r) => compact(r.RDNMADR) === compact(c.address) && (compact(institution).includes(compact(r.LBRRY_NM)) || compact(c.place).includes(compact(r.LBRRY_NM))) && String(r.LBRRY_NM ?? "").length >= 3 && validPoint(r.LONGITUDE, r.LATITUDE));
+  const candidates = rows.filter((r) => compact(r.RDNMADR) === compact(c.address) && (compact(institution).includes(compact(r.LBRRY_NM)) || compact(c.place).includes(compact(r.LBRRY_NM))) && String(r.LBRRY_NM ?? "").length >= 3 && validPoint(r.LONGITUDE, r.LATITUDE));
   const points = [...new Set(candidates.map((r) => `${Number(r.LONGITUDE)},${Number(r.LATITUDE)}`))];
   if (points.length !== 1) return c;
   const row = candidates[0], point = validPoint(row.LONGITUDE, row.LATITUDE);
   return { ...c, ...point, locationEvidence: "data.go.kr:15013109:exact-address-and-library", qualityFlags: c.qualityFlags.filter((x) => x !== "LOCATION_UNVERIFIED"), fieldEvidence: [...c.fieldEvidence, { field: "location", source: "https://www.data.go.kr/data/15013109/standard.do", note: `${row.LBRRY_NM} \xB7 ${row.RDNMADR} \xB7 \uAE30\uC900\uC77C ${row.REFERENCE_DATE}` }] };
 }
 
-// scripts/collect-national.ts
-var now = (/* @__PURE__ */ new Date()).toISOString();
-var rows = [];
-if (process.env.NATIONAL_INPUT) rows = JSON.parse(await readFile(process.env.NATIONAL_INPUT, "utf8")).rows;
-else {
-  const origin = "https://www.data.go.kr";
-  const get = async (url) => {
-    const r = await fetch(url, { signal: AbortSignal.timeout(9e4) });
-    if (!r.ok) throw Error(`SOURCE_HTTP_${r.status}`);
-    return r.json();
-  };
-  const header = await get(`${origin}/download/columList.json?pk=15013110&ext=JSON`);
-  if (!Number.isInteger(header.totalCount) || header.totalCount < 1 || header.totalCount > 1e5 || header.tableVO.svcTableNm !== "tn_pubr_public_lftm_lrn_lctre_svc") throw Error("SOURCE_CONTRACT_CHANGED");
-  for (let page = 1; page <= Math.ceil(header.totalCount / 1e4); page++) {
-    const q = new URLSearchParams({ publicDataPk: "15013110", totalCount: String(header.totalCount), svcTableNm: header.tableVO.svcTableNm, perPage: "10000", page: String(page) });
-    for (const col of header.tableVO.colNmList) q.append("colNmList", col);
-    const part = await get(`${origin}/download/standard.json?${q}`);
-    if (!Array.isArray(part)) throw Error("INVALID_SOURCE_PAGE");
-    rows.push(...part);
-  }
-  if (rows.length !== header.totalCount) throw Error("INCOMPLETE_SOURCE");
+// src/collection-policy.ts
+var LIST_FRESHNESS_MS = 8 * 36e5;
+var DETAIL_FRESHNESS_MS = 6 * 36e5;
+var volatile = /* @__PURE__ */ new Set(["contentRevision", "derivedStatus", "fetchedAt", "verifiedAt", "checkedAt", "publishedAt", "detailCheckedAt"]);
+function stable(value) {
+  if (Array.isArray(value)) return value.map(stable);
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).filter(([k]) => !volatile.has(k)).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => [k, stable(v)]));
+  return value;
 }
-var libraryHeader = await (await fetch("https://www.data.go.kr/download/columList.json?pk=15013109&ext=JSON", { signal: AbortSignal.timeout(3e4) })).json();
-if (!Number.isInteger(libraryHeader.totalCount) || libraryHeader.totalCount > 1e4 || libraryHeader.tableVO.svcTableNm !== "tn_pubr_public_lbrry_svc") throw Error("LIBRARY_CONTRACT_CHANGED");
-var lq = new URLSearchParams({ publicDataPk: "15013109", totalCount: String(libraryHeader.totalCount), svcTableNm: libraryHeader.tableVO.svcTableNm, perPage: "10000", page: "1" });
-for (const col of libraryHeader.tableVO.colNmList) lq.append("colNmList", col);
-var libraries = await (await fetch(`https://www.data.go.kr/download/standard.json?${lq}`, { signal: AbortSignal.timeout(6e4) })).json();
-if (!Array.isArray(libraries) || libraries.length !== libraryHeader.totalCount) throw Error("INCOMPLETE_LIBRARY_SOURCE");
-var byId = /* @__PURE__ */ new Map();
-for (const row of rows) {
-  const c = await normalizeNational(row, now);
-  if (c) {
-    const prev = byId.get(c.id);
-    if (!prev || String(c.sourceUpdatedAt) > String(prev.sourceUpdatedAt)) byId.set(c.id, c);
-  }
+var contentHash = async (value) => (await digest(JSON.stringify(stable(value)))).slice(0, 20);
+
+// scripts/national-collector.ts
+var ORIGIN = "https://www.data.go.kr";
+var API = "https://muryoum.choimaest.workers.dev";
+function fullCheckDue(kind, state, now) {
+  if (!state?.fullCheckedAt) return true;
+  const kst = new Date(Date.parse(now) + 9 * 36e5), previous = new Date(Date.parse(state.fullCheckedAt) + 9 * 36e5);
+  const scheduled = kst.getUTCDay() === 1 && (kind === "national" || kst.getUTCDate() <= 7);
+  return scheduled && kst.toISOString().slice(0, 10) !== previous.toISOString().slice(0, 10) || Date.parse(now) - Date.parse(state.fullCheckedAt) >= (kind === "national" ? 7 : 35) * 864e5;
 }
-var courses = [...byId.values()].map((c) => matchLibrary(c, libraries)).sort((a, b) => a.id.localeCompare(b.id));
-for (const c of courses) c.contentRevision = (await digest(JSON.stringify({ ...c, contentRevision: "" }))).slice(0, 20);
-if (!courses.length) throw Error("EMPTY_VALIDATED_CATALOG");
-var revision = (await digest(JSON.stringify(courses))).slice(0, 20);
-var regionCounts = /* @__PURE__ */ new Map();
-for (const c of courses) regionCounts.set(c.region, (regionCounts.get(c.region) ?? 0) + 1);
-var report = { checkedAt: now, sourceRows: rows.length, courses: courses.length, revision, regions: [...regionCounts].map(([region, count]) => ({ region, count })), free: courses.filter((c) => c.tuition === "free").length, mapped: courses.filter((c) => c.latitude !== null).length };
-var output = process.env.MURYOUM_REPORT_DIR ?? "../artifacts/map-20261028";
-await mkdir(output, { recursive: true });
-await writeFile(`${output}/national-audit.json`, JSON.stringify(report, null, 2));
-await writeFile(`${output}/national-normalized.json`, JSON.stringify(courses));
-console.log(JSON.stringify(report));
-if (process.env.MURYOUM_ADMIN_TOKEN) {
-  const origin = process.env.MURYOUM_API_BASE ?? "https://muryoum.choimaest.workers.dev";
-  if (origin !== "https://muryoum.choimaest.workers.dev") throw Error("INVALID_API_BASE");
-  const post = async (body) => {
-    let result;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const r = await fetch(`${origin}/internal/v3/import`, { method: "POST", redirect: "error", headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.MURYOUM_ADMIN_TOKEN}` }, body: JSON.stringify(body), signal: AbortSignal.timeout(6e4) });
-      if (r.ok) {
-        result = await r.json();
-        return result;
-      }
-      if (r.status < 500) throw Error(`IMPORT_HTTP_${r.status}`);
+async function collectNational({ token, mode = "national", force = false, fetcher = fetch, now = (/* @__PURE__ */ new Date()).toISOString(), emit = console.log }) {
+  if (!token || !["national", "library"].includes(mode)) throw Error("CONFIGURATION_INCOMPLETE");
+  const usage = { sourceRequests: 0, workerRequests: 0, d1RowsRead: 0, d1RowsWritten: 0, kvReads: 0, kvWrites: 0, kvDeletes: 0, kvLists: 0 };
+  const json = async (url, body) => {
+    const internal = url.startsWith(API + "/internal/");
+    usage[internal ? "workerRequests" : "sourceRequests"]++;
+    const r = await fetcher(url, { method: body === void 0 ? "GET" : "POST", redirect: "error", signal: AbortSignal.timeout(9e4), headers: { Accept: "application/json", "User-Agent": "muryoum-operations/2.0", ...internal ? { Authorization: "Bearer " + token } : {}, ...body === void 0 ? {} : { "Content-Type": "application/json" } }, ...body === void 0 ? {} : { body: JSON.stringify(body) } });
+    if (!r.ok) throw Error(`${internal ? "WORKER" : "SOURCE"}_HTTP_${r.status}`);
+    let d;
+    try {
+      d = await r.json();
+    } catch {
+      throw Error(internal ? "WORKER_INVALID_RESPONSE" : "SOURCE_MAINTENANCE");
     }
-    throw Error("IMPORT_FAILED");
+    if (internal && d.usage) {
+      for (const k of Object.keys(usage)) if (k !== "workerRequests" && typeof d.usage[k] === "number") usage[k] += d.usage[k];
+    }
+    return d;
   };
-  for (let i = 0; i < courses.length; i += 30) {
-    const batch = courses.slice(i, i + 30);
-    const result = await post({ scope: "national:all", revision, courses: batch });
-    if (result.status !== "staged" || result.count !== batch.length) throw Error("STAGING_NOT_CONFIRMED");
+  const report = (value) => {
+    const result = { checkedAt: now, mode, ...value, usage };
+    emit(JSON.stringify(result));
+    return result;
+  };
+  const getHeader = async (pk) => {
+    const [meta, header2] = await Promise.all([json(`${ORIGIN}/catalog/${pk}/standard.json`), json(`${ORIGIN}/download/columList.json?pk=${pk}&ext=JSON`)]);
+    const table = pk === "15013110" ? "tn_pubr_public_lftm_lrn_lctre_svc" : "tn_pubr_public_lbrry_svc";
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(meta.dateModified ?? "") || !Number.isInteger(header2.totalCount) || header2.totalCount < 1 || header2.totalCount > (pk === "15013110" ? 1e5 : 1e4) || header2.tableVO?.svcTableNm !== table || !Array.isArray(header2.tableVO?.colNmList)) throw Error("SOURCE_CONTRACT_CHANGED");
+    return { header: header2, fingerprint: await contentHash({ modified: meta.dateModified, count: header2.totalCount, columns: header2.tableVO.colNmList, table }) };
+  };
+  const download = async (pk, header2) => {
+    const rows2 = [];
+    for (let page = 1; page <= Math.ceil(header2.totalCount / 1e4); page++) {
+      const q = new URLSearchParams({ publicDataPk: pk, totalCount: String(header2.totalCount), svcTableNm: header2.tableVO.svcTableNm, perPage: "10000", page: String(page) });
+      for (const c of header2.tableVO.colNmList) q.append("colNmList", c);
+      const part = await json(`${ORIGIN}/download/standard.json?${q}`);
+      if (!Array.isArray(part) || part.some((x) => !x || typeof x !== "object")) throw Error("INVALID_SOURCE_PAGE");
+      rows2.push(...part);
+    }
+    if (rows2.length !== header2.totalCount) throw Error("INCOMPLETE_SOURCE");
+    return rows2;
+  };
+  const saved = await json(API + "/internal/collection-state");
+  let library = saved.library ?? null;
+  if (mode === "library" || !library) {
+    const { header: header2, fingerprint: fingerprint2 } = await getHeader("15013109");
+    if (force || !library || library.fingerprint !== fingerprint2 || fullCheckDue("library", library, now)) {
+      if (saved.budget?.deferOptional !== false) return report({ status: "deferred", code: "QUOTA_DEFERRED", budgetLevel: saved.budget?.level ?? "unknown" });
+      const raw = await download("15013109", header2);
+      const rows2 = raw.map((r) => Object.fromEntries(["LBRRY_NM", "RDNMADR", "LONGITUDE", "LATITUDE", "REFERENCE_DATE"].map((k) => [k, String(r[k] ?? "")])));
+      library = { fingerprint: fingerprint2, sourceRows: rows2.length, metadataCheckedAt: now, fullCheckedAt: now, revision: await contentHash(rows2), rows: rows2 };
+      const response = await json(API + "/internal/collection-state", { kind: "library", state: library, rows: rows2 });
+      if (response.status !== "saved") throw Error("LIBRARY_SAVE_FAILED");
+    }
+    if (mode === "library") return report({ status: "checked", sourceRows: library.sourceRows, revision: library.revision });
   }
-  const published = await post({ scope: "national:all", revision, count: courses.length, action: "publish" });
-  if (published.status !== "published" || published.count !== courses.length || published.revision !== revision) throw Error("PUBLICATION_NOT_CONFIRMED");
-  console.log(JSON.stringify(published));
+  const previous = saved.national ?? null;
+  const { header, fingerprint } = await getHeader("15013110");
+  const next = { ...previous, fingerprint, sourceRows: header.totalCount, metadataCheckedAt: now };
+  const changed = !previous || previous.fingerprint !== fingerprint || previous.libraryRevision !== library.revision;
+  if (!force && !changed && !fullCheckDue("national", previous, now)) {
+    await json(API + "/internal/collection-state", { kind: "national", state: next });
+    await json(API + "/internal/maintenance", {});
+    return report({ status: "metadata_unchanged", fullCheckedAt: previous?.fullCheckedAt, courseRowsWritten: 0 });
+  }
+  if (saved.budget?.deferOptional !== false) return report({ status: "deferred", code: "QUOTA_DEFERRED", budgetLevel: saved.budget?.level ?? "unknown" });
+  const rows = await download("15013110", header), byId = /* @__PURE__ */ new Map();
+  const sourceContentHash = await contentHash(rows);
+  if (previous?.sourceContentHash === sourceContentHash && previous.libraryRevision === library.revision && previous.revision === saved.active?.revision) {
+    const checked2 = await json(API + "/internal/v3/import", { scope: "national:all", revision: previous.revision, count: saved.active.course_count, action: "check" });
+    if (checked2.status === "unchanged") {
+      await json(API + "/internal/collection-state", { kind: "national", state: { ...next, fullCheckedAt: now } });
+      await json(API + "/internal/maintenance", {});
+      return report({ status: "unchanged", sourceRows: rows.length, courses: saved.active.course_count, revision: previous.revision, courseRowsWritten: 0 });
+    }
+  }
+  for (const row of rows) {
+    const c = await normalizeNational(row, now);
+    if (c) {
+      const old = byId.get(c.id);
+      if (!old || String(c.sourceUpdatedAt) > String(old.sourceUpdatedAt)) byId.set(c.id, c);
+    }
+  }
+  const courses = [...byId.values()].map((c) => matchLibrary(c, library.rows)).sort((a, b) => a.id.localeCompare(b.id));
+  for (const c of courses) c.contentRevision = await contentHash(c);
+  if (!courses.length) throw Error("EMPTY_VALIDATED_CATALOG");
+  const revision = await contentHash(courses), base = { scope: "national:all", revision, count: courses.length };
+  const checked = await json(API + "/internal/v3/import", { ...base, action: "check" });
+  let published = checked;
+  if (checked.status !== "unchanged") {
+    for (let i = 0; i < courses.length; i += 30) {
+      const part = courses.slice(i, i + 30), staged = await json(API + "/internal/v3/import", { scope: base.scope, revision, courses: part });
+      if (staged.status === "deferred") return report({ status: "deferred", code: "QUOTA_DEFERRED" });
+      if (staged.status !== "staged" || staged.count !== part.length) throw Error("STAGING_NOT_CONFIRMED");
+    }
+    published = await json(API + "/internal/v3/import", { ...base, action: "publish" });
+    if (published.status === "deferred") return report({ status: "deferred", code: "QUOTA_DEFERRED" });
+    if (published.status !== "published" || published.revision !== revision || published.count !== courses.length) throw Error("PUBLICATION_NOT_CONFIRMED");
+  }
+  await json(API + "/internal/collection-state", { kind: "national", state: { ...next, revision, sourceContentHash, libraryRevision: library.revision, fullCheckedAt: now } });
+  await json(API + "/internal/maintenance", {});
+  return report({ status: published.status, sourceRows: rows.length, courses: courses.length, revision, courseRowsWritten: published.status === "unchanged" ? 0 : courses.length });
+}
+
+// scripts/collect-national.ts
+import { mkdir, writeFile } from "node:fs/promises";
+try {
+  const report = await collectNational({ token: process.env.MURYOUM_ADMIN_TOKEN ?? "", mode: process.env.MURYOUM_SOURCE_MODE ?? "national", force: process.env.MURYOUM_FORCE_FULL === "true" });
+  const output = process.env.MURYOUM_REPORT_DIR ?? "../artifacts/collection-20261105";
+  await mkdir(output, { recursive: true });
+  await writeFile(`${output}/national-audit.json`, JSON.stringify(report, null, 2));
+} catch (error) {
+  const code = error instanceof Error && /^(?:SOURCE|WORKER)_HTTP_\d{3}$|^(?:SOURCE_CONTRACT_CHANGED|SOURCE_MAINTENANCE|INVALID_SOURCE_PAGE|INCOMPLETE_SOURCE|LIBRARY_SAVE_FAILED|EMPTY_VALIDATED_CATALOG|STAGING_NOT_CONFIRMED|PUBLICATION_NOT_CONFIRMED|CONFIGURATION_INCOMPLETE)$/.test(error.message) ? error.message : "COLLECTION_FAILED";
+  console.error(JSON.stringify({ status: "error", code }));
+  process.exitCode = 1;
 }

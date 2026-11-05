@@ -1,8 +1,8 @@
 name: Refresh Muryoum public catalog
 on:
   schedule:
-    # Every four hours: 01:17, 05:17, 09:17, 13:17, 17:17, 21:17 KST.
-    - cron: '17 */4 * * *'
+    # 03:17, 09:17, 15:17, 21:17 KST.
+    - cron: '17 0,6,12,18 * * *'
   workflow_dispatch:
     inputs:
       mode:

@@ -144,6 +144,7 @@ def run_collection(token, *, opener=None, clock=time.time, sleep=time.sleep,
     run_started = clock()
     deadline = run_started + MAX_SECONDS
     headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+    usage = {k: 0 for k in ("sourceRequests", "workerRequests", "d1RowsRead", "d1RowsWritten", "kvReads", "kvWrites", "kvDeletes", "kvLists", "retries")}
 
     def pause(seconds):
         if clock() + seconds >= deadline:
@@ -156,6 +157,9 @@ def run_collection(token, *, opener=None, clock=time.time, sleep=time.sleep,
             if remaining <= 0:
                 raise CollectionFailure("CLIENT_BOUNDED_LIMIT")
             try:
+                usage["workerRequests"] += 1
+                if attempt:
+                    usage["retries"] += 1
                 result = _read_json(opener, request, limit, min(30, remaining))
             except CollectionFailure as error:
                 http = error.http_status if error.http_status is not None else "unknown"
@@ -166,6 +170,14 @@ def run_collection(token, *, opener=None, clock=time.time, sleep=time.sleep,
                 if not collection:
                     return result
                 status, phase, code, run_id = safe_diagnostic(result)
+                metrics = result.get("usage", {})
+                if isinstance(metrics, dict):
+                    for key in usage:
+                        if key not in {"workerRequests", "retries"} and type(metrics.get(key)) is int and 0 <= metrics[key] <= 10000000:
+                            usage[key] += metrics[key]
+                budget = result.get("budget", {})
+                if isinstance(budget, dict) and budget.get("level") in {"warning", "defer", "unknown"}:
+                    emit("Budget: level=" + budget["level"] + "; ordinary detail checks may be deferred")
                 emit(f"Collection: status={status}; phase={phase}; code={code}; runId={run_id}; attempt={attempt + 1}")
                 if status != "error":
                     return result
@@ -217,6 +229,8 @@ def run_collection(token, *, opener=None, clock=time.time, sleep=time.sleep,
         if receipt["scope"] != scope_id:
             raise CollectionFailure("PUBLICATION_RECEIPT_INVALID")
         emit("Publication receipt: " + json.dumps(receipt, sort_keys=True))
+        emit("Collection usage: " + json.dumps(usage, sort_keys=True))
+        receipt["usage"] = usage
         return receipt
 
     # Public checks use no Authorization header. Bypass cached responses for freshness.
